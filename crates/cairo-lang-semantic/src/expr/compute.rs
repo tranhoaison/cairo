@@ -44,7 +44,7 @@ use crate::items::structure::SemanticStructEx;
 use crate::items::trt::ConcreteTraitGenericFunctionLongId;
 use crate::items::us::SemanticUseEx;
 use crate::literals::LiteralLongId;
-use crate::resolve_path::{ResolvedConcreteItem, ResolvedGenericItem, Resolver};
+use crate::resolve::{ResolvedConcreteItem, ResolvedGenericItem, Resolver};
 use crate::semantic::{self, FunctionId, LocalVariable, TypeId, TypeLongId, Variable};
 use crate::substitution::SemanticRewriter;
 use crate::types::{peel_snapshots, resolve_type, wrap_in_snapshots, ConcreteTypeId};
@@ -316,7 +316,7 @@ fn compute_expr_binary_semantic(
     let rexpr = compute_expr_semantic(ctx, &rhs_syntax);
     if matches!(binary_op, BinaryOperator::Eq(_)) {
         let member_path = match lexpr {
-            Expr::Var(expr) => VarMemberPath::Var(expr),
+            Expr::Var(expr) => ExprVarMemberPath::Var(expr),
             Expr::MemberAccess(ExprMemberAccess { member_path: Some(ref_arg), .. }) => ref_arg,
             _ => return Err(ctx.diagnostics.report(lhs_syntax, InvalidLhsForAssignment)),
         };
@@ -1471,7 +1471,7 @@ fn member_access_expr(
                     )
                 })?;
                 let member_path = if n_snapshots == 0 {
-                    lexpr.as_member_path().map(|parent| VarMemberPath::Member {
+                    lexpr.as_member_path().map(|parent| ExprVarMemberPath::Member {
                         parent: Box::new(parent),
                         member_id: member.id,
                         stable_ptr: lexpr.stable_ptr(),

@@ -9,7 +9,6 @@ use cairo_lang_semantic::items::enm::SemanticEnumEx;
 use cairo_lang_semantic::items::imp::ImplLookupContext;
 use cairo_lang_syntax::node::ids::SyntaxStablePtrId;
 use cairo_lang_utils::ordered_hash_map::OrderedHashMap;
-use cairo_lang_utils::try_extract_matches;
 use cairo_lang_utils::unordered_hash_map::UnorderedHashMap;
 use id_arena::Arena;
 use itertools::{zip_eq, Itertools};
@@ -17,8 +16,8 @@ use semantic::expr::inference::InferenceError;
 use semantic::types::wrap_in_snapshots;
 use {cairo_lang_defs as defs, cairo_lang_semantic as semantic};
 
+use super::block_builder::{BlockBuilder, SealedBlockBuilder};
 use super::generators;
-use super::scope::{BlockBuilder, SealedBlockBuilder};
 use super::usage::BlockUsages;
 use crate::blocks::FlatBlocksBuilder;
 use crate::db::LoweringGroup;
@@ -137,8 +136,7 @@ pub struct LoweringContext<'a, 'db> {
     pub function_id: FunctionWithBodyId,
     /// Id for the current concrete function to be used when generating recursive calls.
     /// This it the generic function specialized with its own generic parameters.
-    // TODO(spapini): Remove the 'Option' once this is actually computed for all cases.
-    pub concrete_function_id: Option<ConcreteFunctionWithBodyId>,
+    pub concrete_function_id: ConcreteFunctionWithBodyId,
     /// Current emitted diagnostics.
     pub diagnostics: LoweringDiagnostics,
     /// Lowered blocks of the function.
@@ -154,10 +152,8 @@ impl<'a, 'db> LoweringContext<'a, 'db> {
         'db: 'a,
     {
         let db = global_ctx.db;
+        let concrete_function_id = function_id.to_concrete(db)?;
         let semantic_function = function_id.base_semantic_function(db);
-        let concrete_function_id =
-            try_extract_matches!(semantic_function, defs::ids::FunctionWithBodyId::Free)
-                .and_then(|free| ConcreteFunctionWithBodyId::from_no_generics_free(db, free));
         let module_file_id = semantic_function.module_file_id(db.upcast());
         Ok(Self {
             encapsulating_ctx: Some(global_ctx),
@@ -222,30 +218,30 @@ impl LoweredExpr {
     pub fn var(
         self,
         ctx: &mut LoweringContext<'_, '_>,
-        scope: &mut BlockBuilder,
+        builder: &mut BlockBuilder,
     ) -> Result<VariableId, LoweringFlowError> {
         match self {
             LoweredExpr::AtVariable(var_id) => Ok(var_id),
             LoweredExpr::Tuple { exprs, location } => {
                 let inputs: Vec<_> = exprs
                     .into_iter()
-                    .map(|expr| expr.var(ctx, scope))
+                    .map(|expr| expr.var(ctx, builder))
                     .collect::<Result<Vec<_>, _>>()?;
                 let tys = inputs.iter().map(|var| ctx.variables[*var].ty).collect();
                 let ty = ctx.db.intern_type(semantic::TypeLongId::Tuple(tys));
                 Ok(generators::StructConstruct { inputs, ty, location }
-                    .add(ctx, &mut scope.statements))
+                    .add(ctx, &mut builder.statements))
             }
-            LoweredExpr::ExternEnum(extern_enum) => extern_enum.var(ctx, scope),
+            LoweredExpr::ExternEnum(extern_enum) => extern_enum.var(ctx, builder),
             LoweredExpr::SemanticVar(semantic_var_id, location) => {
-                Ok(scope.get_semantic(ctx, semantic_var_id, location))
+                Ok(builder.get_semantic(ctx, semantic_var_id, location))
             }
             LoweredExpr::Snapshot { expr, location } => {
                 let (original, snapshot) =
-                    generators::Snapshot { input: expr.clone().var(ctx, scope)?, location }
-                        .add(ctx, &mut scope.statements);
+                    generators::Snapshot { input: expr.clone().var(ctx, builder)?, location }
+                        .add(ctx, &mut builder.statements);
                 if let LoweredExpr::SemanticVar(semantic_var_id, _location) = &*expr {
-                    scope.put_semantic(*semantic_var_id, original);
+                    builder.put_semantic(*semantic_var_id, original);
                 }
 
                 Ok(snapshot)
@@ -279,14 +275,14 @@ pub struct LoweredExprExternEnum {
     pub function: semantic::FunctionId,
     pub concrete_enum_id: semantic::ConcreteEnumId,
     pub inputs: Vec<VariableId>,
-    pub member_paths: Vec<semantic::VarMemberPath>,
+    pub member_paths: Vec<semantic::ExprVarMemberPath>,
     pub location: StableLocationOption,
 }
 impl LoweredExprExternEnum {
     pub fn var(
         self,
         ctx: &mut LoweringContext<'_, '_>,
-        scope: &mut BlockBuilder,
+        builder: &mut BlockBuilder,
     ) -> LoweringResult<VariableId> {
         let concrete_variants = ctx
             .db
@@ -298,7 +294,7 @@ impl LoweredExprExternEnum {
             .clone()
             .into_iter()
             .map(|concrete_variant| {
-                let mut subscope = scope.subscope(ctx.blocks.alloc_empty());
+                let mut subscope = builder.child_block_builder(ctx.blocks.alloc_empty());
                 let block_id = subscope.block_id;
 
                 let mut var_ids = vec![];
@@ -349,9 +345,9 @@ impl LoweredExprExternEnum {
                 .collect(),
             location: self.location,
         });
-        scope
+        builder
             .merge_and_end_with_match(ctx, match_info, sealed_blocks, self.location)?
-            .var(ctx, scope)
+            .var(ctx, builder)
     }
 }
 
@@ -364,7 +360,7 @@ pub enum LoweringFlowError {
     Failed(DiagnosticAdded),
     Panic(VariableId),
     Return(VariableId, StableLocationOption),
-    /// Every match arm is terminating - does not flow to parent scope
+    /// Every match arm is terminating - does not flow to parent builder
     /// e.g. returns or panics.
     Match(MatchInfo),
 }
@@ -379,23 +375,23 @@ impl LoweringFlowError {
     }
 }
 
-/// Converts a lowering flow error to the appropriate block scope end, if possible.
+/// Converts a lowering flow error to the appropriate block builder end, if possible.
 pub fn lowering_flow_error_to_sealed_block(
     ctx: &mut LoweringContext<'_, '_>,
-    scope: BlockBuilder,
+    builder: BlockBuilder,
     err: LoweringFlowError,
 ) -> Maybe<SealedBlockBuilder> {
-    let block_id = scope.block_id;
+    let block_id = builder.block_id;
     match err {
         LoweringFlowError::Failed(diag_added) => return Err(diag_added),
         LoweringFlowError::Return(return_var, location) => {
-            scope.ret(ctx, return_var, location)?;
+            builder.ret(ctx, return_var, location)?;
         }
         LoweringFlowError::Panic(data_var) => {
-            scope.panic(ctx, data_var)?;
+            builder.panic(ctx, data_var)?;
         }
         LoweringFlowError::Match(info) => {
-            scope.unreachable_match(ctx, info);
+            builder.unreachable_match(ctx, info);
         }
     }
     Ok(SealedBlockBuilder::Ends(block_id))

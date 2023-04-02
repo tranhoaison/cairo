@@ -61,11 +61,7 @@ extern fn ec_point_is_zero(p: EcPoint) -> IsZeroResult<EcPoint> nopanic;
 /// Converts `p` to `NonZeroEcPoint`. Panics if `p` is the zero point.
 fn ec_point_non_zero(p: EcPoint) -> NonZeroEcPoint {
     match ec_point_is_zero(p) {
-        IsZeroResult::Zero(()) => {
-            let mut data = ArrayTrait::new();
-            data.append('Zero point');
-            panic(data)
-        },
+        IsZeroResult::Zero(()) => panic_with_felt252('Zero point'),
         IsZeroResult::NonZero(p_nz) => p_nz,
     }
 }
@@ -107,7 +103,7 @@ fn ec_mul(p: EcPoint, m: felt252) -> EcPoint {
     }
 }
 
-impl EcPointAdd of Add::<EcPoint> {
+impl EcPointAdd of Add<EcPoint> {
     /// Computes the sum of two points on the curve.
     // TODO(lior): Implement using a libfunc to make it more efficient.
     fn add(p: EcPoint, q: EcPoint) -> EcPoint {
@@ -130,14 +126,14 @@ impl EcPointAdd of Add::<EcPoint> {
     }
 }
 
-impl EcPointAddEq of AddEq::<EcPoint> {
+impl EcPointAddEq of AddEq<EcPoint> {
     #[inline(always)]
     fn add_eq(ref self: EcPoint, other: EcPoint) {
         self = Add::add(self, other);
     }
 }
 
-impl EcPointSub of Sub::<EcPoint> {
+impl EcPointSub of Sub<EcPoint> {
     /// Computes the difference between two points on the curve.
     fn sub(p: EcPoint, q: EcPoint) -> EcPoint {
         match ec_point_is_zero(q) {
@@ -152,7 +148,7 @@ impl EcPointSub of Sub::<EcPoint> {
     }
 }
 
-impl EcPointSubEq of SubEq::<EcPoint> {
+impl EcPointSubEq of SubEq<EcPoint> {
     #[inline(always)]
     fn sub_eq(ref self: EcPoint, other: EcPoint) {
         self = Sub::sub(self, other);
