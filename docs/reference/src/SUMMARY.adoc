@@ -16,7 +16,8 @@ link:notation.adoc[Notation]
 * Modules and source files
 
 * link:items.adoc[Items]
-** Use declarations
+** link:module.adoc[Modules]
+** link:use.adoc[Use declarations]
 ** Functions
 *** Implicit arguments
 ** Type aliases
